@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#ffc8e4">
+<title>Анимешный бильярд</title>
+<style>
+  /* розовая аниме-тема */
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #ffc8e4; color: #c2185b;
+    font-family: "Trebuchet MS", "Courier New", sans-serif;
+    -webkit-user-select: none; user-select: none;
+  }
+  /* верхняя панель: счёт и кнопки */
+  #top {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 5;
+    padding: calc(env(safe-area-inset-top) + 6px) 10px 6px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  #info { flex: 1; font-size: 13px; line-height: 1.35; }
+  #info b { font-size: 17px; letter-spacing: 1px; color: #ff2d87; text-shadow: 0 0 8px #fff, 0 0 2px #fff; }
+  #top button {
+    width: 42px; height: 42px; border-radius: 50%;
+    border: 2px solid #ff6fb5; background: #fff8; font-size: 20px;
+    box-shadow: 0 0 8px #ff6fb588;
+  }
+  /* игровое поле на весь экран */
+  #game { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+
+  /* окна поверх игры (победа, редактор фото) */
+  .overlay {
+    position: absolute; inset: 0; z-index: 10; background: #ff6fb555;
+    display: none; align-items: center; justify-content: center;
+  }
+  .overlay.show { display: flex; }
+  .box {
+    width: min(320px, 90vw); padding: 18px; text-align: center;
+    border: 2px solid #ff6fb5; border-radius: 18px; background: #fff0f7;
+    box-shadow: 0 0 25px #ff6fb5;
+  }
+  .box h2 { margin: 0 0 10px; color: #ff2d87; }
+  .box button {
+    margin: 6px 4px 0; padding: 10px 14px; border-radius: 12px;
+    border: 2px solid #ff6fb5; background: #fff; color: #c2185b;
+    font: bold 15px "Trebuchet MS", sans-serif;
+  }
+  #cropCanvas { background: #ffe3f1; border-radius: 10px; touch-action: none; max-width: 100%; }
+  input[type=range] { width: 100%; accent-color: #ff6fb5; }
+  .small { font-size: 12px; opacity: 0.8; }
+</style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+
+<div id="top">
+  <div id="info">
+    <b>АНИМЕШНЫЙ БИЛЬЯРД</b><br>
+    <span id="score">Уровень 1 · В банке 0/3 · Удары 0</span>
+  </div>
+  <button id="btnPhoto" title="Фото на шарах">📷</button>
+  <button id="btnSound" title="Звук">🔊</button>
+  <button id="btnRestart" title="Заново">🔄</button>
+</div>
+
+<!-- окно победы -->
+<div class="overlay" id="winBox">
+  <div class="box">
+    <h2>💖 ВСЕ В БАНКЕ! 💖</h2>
+    <div id="winText"></div>
+    <button id="btnNext">Дальше ▶</button>
+  </div>
+</div>
+
+<!-- редактор фото: двигаешь фото пальцем, ползунок — масштаб -->
+<div class="overlay" id="photoBox">
+  <div class="box">
+    <h2>📷 Лицо на шар</h2>
+    <canvas id="cropCanvas" width="240" height="240"></canvas>
+    <div class="small">Двигай фото пальцем, чтобы лицо было в круге</div>
+    <input type="range" id="zoom" min="1" max="4" step="0.01" value="1">
+    <div class="small">Фото хранится только на этом устройстве</div>
+    <button id="btnPick">Выбрать фото</button>
+    <button id="btnCropOk">Готово</button><br>
+    <button id="btnPhotoOff">Убрать фото</button>
+    <button id="btnCropCancel">Отмена</button>
+    <input type="file" id="fileInput" accept="image/*" hidden>
+  </div>
+</div>
+
+<script>
+// ===================== НАСТРОЙКИ ИГРЫ =====================
+const W = 400, H = 700;   // размер поля в "игровых" пикселях (потом масштабируется под экран)
+const R = 18;             // радиус шара
+const WALL = 4;           // половина толщины стенки банки
+const MAX_PULL = 140;     // насколько максимально можно оттянуть кий
+const MAX_SPEED = 22;     // скорость шара при полном ударе
+const FRICTION = 0.988;   // трение: каждый кадр скорость умножается на это число
+
+// Контур банки 5 л (горлышко ВНИЗУ). Точки идут по стенке:
+// левая сторона горлышка → плечо → бок → дно (сверху) → правый бок → плечо → правая сторона горлышка.
+// Между первой и последней точкой — дырка горлышка, через неё шары залетают внутрь.
+const JAR = [
+  [170, 425], [170, 385], [92, 335], [92, 140], [112, 118],
+  [288, 118], [308, 140], [308, 335], [230, 385], [230, 425]
+];
+
+// Цвета и значки газявных шаров (если фото не выбрано)
+const COLORS = ['#ff8fc7', '#c9a0ff', '#ffd1e8', '#a0d8ff', '#ffb3c1', '#fff0a0', '#b8f5d8', '#ff6fb5'];
+const ICONS  = ['🌸', '💖', '🎀', '🍓', '⭐', '🍡', '🐱', '🌙'];
+
+// ===================== АНИМЕ-ДЕВОЧКИ НА ФОНЕ =====================
+// Рисуем простую чиби-девочку в SVG (свой рисунок, без чужих картинок).
+// hair — цвет волос, eye — цвет глаз, dress — платье, bow — бантик
+function makeGirl(hair, eye, dress, bow) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 240">
+    <ellipse cx="22" cy="135" rx="22" ry="70" fill="${hair}"/>
+    <ellipse cx="178" cy="135" rx="22" ry="70" fill="${hair}"/>
+    <path d="M32 105 Q100 -15 168 105 L172 190 Q100 205 28 190 Z" fill="${hair}"/>
+    <path d="M58 240 Q58 182 100 182 Q142 182 142 240 Z" fill="${dress}"/>
+    <ellipse cx="100" cy="128" rx="58" ry="55" fill="#ffe8dc"/>
+    <path d="M40 120 Q42 52 100 46 Q158 52 160 120 Q142 86 126 102 Q116 76 100 96 Q84 76 74 102 Q58 86 40 120 Z" fill="${hair}"/>
+    <ellipse cx="76" cy="138" rx="13" ry="18" fill="${eye}"/>
+    <ellipse cx="124" cy="138" rx="13" ry="18" fill="${eye}"/>
+    <circle cx="71" cy="131" r="5.5" fill="#fff"/>
+    <circle cx="119" cy="131" r="5.5" fill="#fff"/>
+    <circle cx="80" cy="146" r="2.5" fill="#fff"/>
+    <circle cx="128" cy="146" r="2.5" fill="#fff"/>
+    <ellipse cx="60" cy="160" rx="10" ry="5" fill="#ff8fb8" opacity="0.7"/>
+    <ellipse cx="140" cy="160" rx="10" ry="5" fill="#ff8fb8" opacity="0.7"/>
+    <path d="M92 163 Q100 171 108 163" stroke="#b0405e" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <path d="M135 52 L162 36 L162 70 Z M135 52 L108 36 L108 70 Z" fill="${bow}"/>
+    <circle cx="135" cy="53" r="7" fill="${bow}"/>
+  </svg>`;
+  const img = new Image();
+  img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  return img;
+}
+const GIRLS = [
+  makeGirl('#ff8fc7', '#7a3cff', '#ffffff', '#ff2d87'),   // розовые волосы
+  makeGirl('#b48cff', '#ff4f8b', '#ffd1e8', '#ffffff'),   // сиреневые волосы
+  makeGirl('#ffe08a', '#3a8cff', '#ff8fc7', '#ff2d87')    // блондинка
+];
+
+// ===================== СОСТОЯНИЕ =====================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let scale = 1, offX = 0, offY = 0;   // как игровое поле вписано в экран
+
+let level = 1;
+let balls = [];
+let shots = 0;
+let aim = null;        // прицеливание: { ball, px, py } — шар и где палец
+let won = false;
+let particles = [];    // сердечки, когда шар залетел в банку
+let soundOn = true;
+let time = 0;          // счётчик кадров — для пульсации ауры
+
+// Лепестки сакуры: падают сверху, качаются и крутятся
+let petals = [];
+function newPetal(anyY) {
+  return {
+    x: Math.random() * W,
+    y: anyY ? Math.random() * H : -10,     // при старте — по всему экрану, потом — сверху
+    size: 5 + Math.random() * 5,
+    speed: 0.5 + Math.random() * 0.8,
+    sway: Math.random() * Math.PI * 2,     // фаза покачивания
+    rot: Math.random() * Math.PI * 2,
+    spin: (Math.random() - 0.5) * 0.06
+  };
+}
+for (let i = 0; i < 28; i++) petals.push(newPetal(true));
+
+let photoImg = null;   // картинка лица (если выбрана)
+
+// ===================== СОХРАНЕНИЕ (только на этом устройстве) =====================
+// localStorage может не работать (приватный режим) — поэтому всегда try/catch
+function load(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+function save(key, val) { try { localStorage.setItem(key, val); } catch (e) {} }
+function remove(key) { try { localStorage.removeItem(key); } catch (e) {} }
+
+// при запуске подгружаем сохранённое фото
+const savedPhoto = load('jar_photo');
+if (savedPhoto) { photoImg = new Image(); photoImg.src = savedPhoto; }
+level = Number(load('jar_level')) || 1;
+
+// ===================== ЗВУКИ (синтез WebAudio, без файлов) =====================
+let audio = null;
+function initAudio() {
+  if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (audio && audio.state === 'suspended') audio.resume();
+}
+// один короткий звук: частота от f1 до f2 за время dur
+function beep(f1, f2, dur, vol, type) {
+  if (!soundOn || !audio) return;
+  const t = audio.currentTime;
+  const osc = audio.createOscillator();
+  const gain = audio.createGain();
+  osc.type = type || 'sine';
+  osc.frequency.setValueAtTime(f1, t);
+  osc.frequency.exponentialRampToValueAtTime(f2, t + dur);
+  gain.gain.setValueAtTime(vol, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  osc.connect(gain); gain.connect(audio.destination);
+  osc.start(t); osc.stop(t + dur);
+}
+let lastHitSound = 0;
+function soundHit(power) {        // стук шаров/стенок (не чаще раза в 40 мс)
+  const now = performance.now();
+  if (now - lastHitSound < 40 || power < 0.8) return;
+  lastHitSound = now;
+  beep(900, 500, 0.05, Math.min(0.25, power * 0.03), 'triangle');
+}
+function soundCue()  { beep(300, 120, 0.12, 0.35, 'square'); }               // удар кием
+function soundPlop() { beep(200, 900, 0.18, 0.3); setTimeout(() => beep(500, 1400, 0.1, 0.2), 90); } // бульк
+function soundWin()  { [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => beep(f, f, 0.2, 0.25, 'square'), i * 130)); }
+
+// ===================== УРОВЕНЬ =====================
+function ballCount() { return Math.min(2 + level, 8); }   // 1 уровень — 3 шара, дальше +1, максимум 8
+
+function startLevel() {
+  balls = [];
+  shots = 0;
+  won = false;
+  particles = [];
+  const n = ballCount();
+  // расставляем шары внизу поля случайно, чтобы не налезали друг на друга
+  let tries = 0;
+  while (balls.length < n && tries < 2000) {
+    tries++;
+    const x = 40 + Math.random() * (W - 80);
+    const y = 480 + Math.random() * 170;
+    let ok = true;
+    for (const b of balls) {
+      if (Math.hypot(b.x - x, b.y - y) < R * 2 + 10) { ok = false; break; }
+    }
+    if (ok) {
+      const i = balls.length;
+      balls.push({ x, y, vx: 0, vy: 0, rot: 0, color: COLORS[i], icon: ICONS[i], inJar: false });
+    }
+  }
+  document.getElementById('winBox').classList.remove('show');
+  updateScore();
+}
+
+function updateScore() {
+  const inside = balls.filter(b => b.inJar).length;
+  const best = load('jar_best_' + level);
+  document.getElementById('score').textContent =
+    `Уровень ${level} · В банке ${inside}/${balls.length} · Удары ${shots}` + (best ? ` · Рекорд ${best}` : '');
+}
+
+// ===================== ФИЗИКА =====================
+// Точка внутри многоугольника? (классический способ "луча")
+function insidePoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// Шар против отрезка стенки: находим ближайшую точку отрезка и отталкиваем шар
+function hitSegment(b, ax, ay, cx, cy) {
+  const sx = cx - ax, sy = cy - ay;
+  let t = ((b.x - ax) * sx + (b.y - ay) * sy) / (sx * sx + sy * sy);
+  t = Math.max(0, Math.min(1, t));
+  const px = ax + sx * t, py = ay + sy * t;     // ближайшая точка стенки
+  let nx = b.x - px, ny = b.y - py;
+  const d = Math.hypot(nx, ny);
+  const minD = R + WALL;
+  if (d < minD && d > 0) {
+    nx /= d; ny /= d;
+    b.x = px + nx * minD;                        // выталкиваем шар из стенки
+    b.y = py + ny * minD;
+    const vn = b.vx * nx + b.vy * ny;            // скорость "в стенку"
+    if (vn < 0) {                                // отражаем её (0.8 — упругость)
+      b.vx -= 1.8 * vn * nx;
+      b.vy -= 1.8 * vn * ny;
+      soundHit(-vn);
+    }
+  }
+}
+
+// Два шара столкнулись — раздвигаем и обмениваемся скоростью (массы одинаковые)
+function hitBalls(a, b) {
+  let nx = b.x - a.x, ny = b.y - a.y;
+  const d = Math.hypot(nx, ny);
+  if (d >= R * 2 || d === 0) return;
+  nx /= d; ny /= d;
+  const overlap = (R * 2 - d) / 2;
+  a.x -= nx * overlap; a.y -= ny * overlap;
+  b.x += nx * overlap; b.y += ny * overlap;
+  const rv = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;   // скорость сближения
+  if (rv < 0) {
+    const j = -(1 + 0.95) * rv / 2;
+    a.vx -= j * nx; a.vy -= j * ny;
+    b.vx += j * nx; b.vy += j * ny;
+    soundHit(-rv);
+  }
+}
+
+// Один маленький шаг физики
+function physicsStep(dt) {
+  for (const b of balls) {
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.rot += (b.vx / R) * dt;   // шар "катится" — крутим картинку
+
+    // бортики стола
+    if (b.x < R)     { b.x = R;     if (b.vx < 0) { soundHit(-b.vx); b.vx = -b.vx * 0.8; } }
+    if (b.x > W - R) { b.x = W - R; if (b.vx > 0) { soundHit(b.vx);  b.vx = -b.vx * 0.8; } }
+    if (b.y < R)     { b.y = R;     if (b.vy < 0) { soundHit(-b.vy); b.vy = -b.vy * 0.8; } }
+    if (b.y > H - R) { b.y = H - R; if (b.vy > 0) { soundHit(b.vy);  b.vy = -b.vy * 0.8; } }
+
+    // стенки банки
+    for (let i = 0; i < JAR.length - 1; i++) {
+      hitSegment(b, JAR[i][0], JAR[i][1], JAR[i + 1][0], JAR[i + 1][1]);
+    }
+  }
+  // шары между собой
+  for (let i = 0; i < balls.length; i++) {
+    for (let j = i + 1; j < balls.length; j++) hitBalls(balls[i], balls[j]);
+  }
+}
+
+function anyMoving() { return balls.some(b => Math.abs(b.vx) + Math.abs(b.vy) > 0.05); }
+
+function update(dt) {
+  // 4 маленьких шага вместо одного большого — чтобы быстрый шар не пролетал сквозь стенку
+  for (let s = 0; s < 4; s++) physicsStep(dt / 4);
+
+  const fr = Math.pow(FRICTION, dt);
+  for (const b of balls) {
+    b.vx *= fr; b.vy *= fr;
+    if (Math.abs(b.vx) + Math.abs(b.vy) < 0.05) { b.vx = 0; b.vy = 0; }
+
+    // шар в банке, если его центр внутри контура и выше горлышка
+    const nowIn = insidePoly(b.x, b.y, JAR) && b.y < 390;
+    if (nowIn && !b.inJar) { soundPlop(); addBubbles(b.x, b.y); }
+    if (nowIn !== b.inJar) { b.inJar = nowIn; updateScore(); }
+  }
+
+  // сердечки летят вверх и тают
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= 0.015 * dt; }
+  particles = particles.filter(p => p.life > 0);
+
+  // лепестки сакуры падают; упавший вниз появляется заново сверху
+  time += dt;
+  for (let i = 0; i < petals.length; i++) {
+    const p = petals[i];
+    p.y += p.speed * dt;
+    p.x += Math.sin(time * 0.03 + p.sway) * 0.6 * dt;
+    p.rot += p.spin * dt;
+    if (p.y > H + 10) petals[i] = newPetal(false);
+  }
+  // аура любви: иногда из банки вылетает сердечко
+  if (Math.random() < 0.04 * dt) {
+    particles.push({ x: 100 + Math.random() * 200, y: 120 + Math.random() * 250,
+                     vx: (Math.random() - 0.5) * 0.6, vy: -0.6 - Math.random() * 0.6, r: 5 + Math.random() * 5, life: 1 });
+  }
+
+  // победа: все шары в банке и всё остановилось
+  if (!won && balls.length && balls.every(b => b.inJar) && !anyMoving()) {
+    won = true;
+    soundWin();
+    const best = Number(load('jar_best_' + level));
+    let text = `Уровень ${level} пройден за ${shots} ударов`;
+    if (!best || shots < best) { save('jar_best_' + level, shots); text += '<br>🏆 Новый рекорд!'; }
+    document.getElementById('winText').innerHTML = text;
+    setTimeout(() => document.getElementById('winBox').classList.add('show'), 600);
+  }
+}
+
+function addBubbles(x, y) {
+  for (let i = 0; i < 14; i++) {
+    particles.push({ x, y, vx: (Math.random() - 0.5) * 3, vy: -Math.random() * 3 - 0.5, r: 5 + Math.random() * 6, life: 1 });
+  }
+}
+
+// ===================== РИСОВАНИЕ =====================
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = innerWidth * dpr;
+  canvas.height = innerHeight * dpr;
+  // вписываем поле W×H в экран (сверху оставляем место под панель)
+  const topSpace = 60;
+  scale = Math.min(innerWidth / W, (innerHeight - topSpace) / H);
+  offX = (innerWidth - W * scale) / 2;
+  offY = topSpace + (innerHeight - topSpace - H * scale) / 2;
+  ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * offX, dpr * offY);
+}
+
+// Сердечко с центром (x, y) и размером s
+function heartPath(x, y, s) {
+  ctx.beginPath();
+  ctx.moveTo(x, y + s * 0.35);
+  ctx.bezierCurveTo(x - s, y - s * 0.4, x - s * 0.4, y - s, x, y - s * 0.35);
+  ctx.bezierCurveTo(x + s * 0.4, y - s, x + s, y - s * 0.4, x, y + s * 0.35);
+  ctx.closePath();
+}
+
+function drawTable() {
+  // розовое сукно стола
+  const g = ctx.createRadialGradient(W / 2, 270, 40, W / 2, H / 2, 460);
+  g.addColorStop(0, '#ffe3f1');
+  g.addColorStop(1, '#ff9ccf');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // аниме-девочки выглядывают из-за банки и сидят внизу (полупрозрачные — это фон)
+  ctx.globalAlpha = 0.8;
+  ctx.drawImage(GIRLS[0], -6, 175, 96, 115);
+  ctx.drawImage(GIRLS[1], 310, 175, 96, 115);
+  ctx.globalAlpha = 0.45;
+  ctx.drawImage(GIRLS[2], 125, 530, 150, 180);
+  ctx.globalAlpha = 1;
+
+  ctx.strokeStyle = '#ff6fb5';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, W - 4, H - 4);
+}
+
+function drawJar() {
+  // аура любви: пульсирующее розовое свечение вокруг банки
+  const pulse = 0.5 + 0.5 * Math.sin(time * 0.06);
+  const aura = ctx.createRadialGradient(200, 260, 60, 200, 260, 200 + pulse * 30);
+  aura.addColorStop(0, 'rgba(255, 60, 150, 0.35)');
+  aura.addColorStop(1, 'rgba(255, 60, 150, 0)');
+  ctx.fillStyle = aura;
+  ctx.fillRect(0, 40, W, 440);
+
+  // стекло внутри
+  ctx.beginPath();
+  JAR.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.fill();
+
+  // большое сердце внутри банки (тоже пульсирует)
+  heartPath(200, 245, 55 + pulse * 6);
+  ctx.fillStyle = 'rgba(255, 45, 135, 0.18)';
+  ctx.fill();
+
+  // надпись на банке — вверх ногами, банка же перевёрнута :)
+  ctx.save();
+  ctx.translate(200, 230);
+  ctx.rotate(Math.PI);
+  ctx.fillStyle = 'rgba(194, 24, 91, 0.45)';
+  ctx.font = 'bold 26px "Courier New"';
+  ctx.textAlign = 'center';
+  ctx.fillText('ГАЗЯВА', 0, 0);
+  ctx.font = 'bold 18px "Courier New"';
+  ctx.fillText('5 Л', 0, 26);
+  ctx.restore();
+
+  // сами стенки
+  ctx.beginPath();
+  JAR.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
+  ctx.lineWidth = WALL * 2;
+  ctx.shadowColor = '#ff2d87';
+  ctx.shadowBlur = 10 + pulse * 12;     // свечение стенок пульсирует вместе с аурой
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // блик на стекле
+  ctx.beginPath();
+  ctx.moveTo(110, 160); ctx.lineTo(110, 320);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+  ctx.lineWidth = 6;
+  ctx.stroke();
+}
+
+// Лепесток сакуры: овал с вырезом на кончике
+function drawPetal(p) {
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(p.rot);
+  const s = p.size;
+  ctx.beginPath();
+  ctx.moveTo(0, -s);
+  ctx.quadraticCurveTo(s, -s * 0.3, 0, s);
+  ctx.quadraticCurveTo(-s, -s * 0.3, 0, -s);
+  ctx.fillStyle = 'rgba(255, 183, 213, 0.9)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 105, 170, 0.6)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawBall(b) {
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.save();
+  ctx.rotate(b.rot);
+  ctx.beginPath();
+  ctx.arc(0, 0, R, 0, Math.PI * 2);
+  ctx.clip();                                   // всё дальше рисуется только внутри круга
+  if (photoImg && photoImg.complete) {
+    ctx.drawImage(photoImg, -R, -R, R * 2, R * 2);
+  } else {
+    ctx.fillStyle = b.color;
+    ctx.fillRect(-R, -R, R * 2, R * 2);
+    ctx.font = '20px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(b.icon, 0, 1);
+  }
+  ctx.restore();
+  // объём: блик и тень (не крутятся вместе с шаром)
+  const g = ctx.createRadialGradient(-6, -7, 2, 0, 0, R);
+  g.addColorStop(0, 'rgba(255,255,255,0.45)');
+  g.addColorStop(0.4, 'rgba(255,255,255,0)');
+  g.addColorStop(1, 'rgba(0,0,0,0.35)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(0, 0, R, 0, Math.PI * 2);
+  ctx.fill();
+  if (b.inJar) {                                 // шар в банке — розовая аура вокруг
+    ctx.shadowColor = '#ff2d87';
+    ctx.shadowBlur = 14;
+  }
+  ctx.strokeStyle = b.inJar ? '#ff2d87' : 'rgba(150, 30, 90, 0.6)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawCue() {
+  if (!aim) return;
+  const b = aim.ball;
+  let ux = aim.px - b.x, uy = aim.py - b.y;    // направление от шара к пальцу
+  const dist = Math.hypot(ux, uy) || 1;
+  ux /= dist; uy /= dist;
+  const pull = Math.min(dist, MAX_PULL);
+
+  // пунктир — куда полетит шар (в обратную сторону от пальца)
+  ctx.setLineDash([6, 8]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(b.x, b.y);
+  ctx.lineTo(b.x - ux * (60 + pull * 2), b.y - uy * (60 + pull * 2));
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // кий: начинается за шаром, тем дальше, чем сильнее оттянули
+  const sx = b.x + ux * (R + 6 + pull * 0.5), sy = b.y + uy * (R + 6 + pull * 0.5);
+  const ex = sx + ux * 280, ey = sy + uy * 280;
+  ctx.lineCap = 'round';
+  ctx.shadowColor = '#ff2d87'; ctx.shadowBlur = 10;          // кий тоже светится
+  ctx.strokeStyle = '#fff0f7'; ctx.lineWidth = 9;            // белый кий
+  ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+  ctx.strokeStyle = '#ff6fb5'; ctx.lineWidth = 11;           // розовая ручка
+  ctx.beginPath(); ctx.moveTo(sx + ux * 190, sy + uy * 190); ctx.lineTo(ex, ey); ctx.stroke();
+  ctx.shadowBlur = 0;
+  heartPath(ex + ux * 8, ey + uy * 8, 16);                  // сердечко на конце кия
+  ctx.fillStyle = '#ff2d87'; ctx.fill();
+  ctx.strokeStyle = '#a0d8ff'; ctx.lineWidth = 8;            // голубой мелок на кончике
+  ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + ux * 6, sy + uy * 6); ctx.stroke();
+
+  // полоска силы удара
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.fillRect(100, H - 26, 200, 12);
+  ctx.fillStyle = pull > MAX_PULL * 0.8 ? '#ff2d87' : '#ff8fc7';
+  ctx.fillRect(100, H - 26, 200 * pull / MAX_PULL, 12);
+}
+
+function draw() {
+  // очищаем весь экран (сбрасываем масштаб, чтобы закрасить и поля по краям)
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#ffc8e4';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.restore();
+  drawTable();
+  drawJar();
+  for (const b of balls) drawBall(b);
+  for (const p of particles) {                   // сердечки ауры
+    heartPath(p.x, p.y, p.r);
+    ctx.fillStyle = `rgba(255, 45, 135, ${p.life * 0.8})`;
+    ctx.fill();
+  }
+  drawCue();
+  for (const p of petals) drawPetal(p);          // сакура падает поверх всего
+
+  // подсказка в начале уровня
+  if (shots === 0 && !aim) {
+    ctx.fillStyle = '#c2185b';
+    ctx.font = 'bold 14px "Trebuchet MS"';
+    ctx.textAlign = 'center';
+    ctx.fillText('Зажми шар и тяни назад, как кий.', W / 2, 455);
+    ctx.fillText('Отпусти — удар! Загони всех в банку', W / 2, 473);
+  }
+}
+
+// ===================== ГЛАВНЫЙ ЦИКЛ =====================
+let lastTime = performance.now();
+function loop(now) {
+  const dt = Math.min((now - lastTime) / 16.67, 2);   // 1 = один кадр при 60 FPS
+  lastTime = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// ===================== УПРАВЛЕНИЕ =====================
+// перевод координат пальца в координаты игрового поля
+function toGame(e) {
+  return { x: (e.clientX - offX) / scale, y: (e.clientY - offY) / scale };
+}
+
+canvas.addEventListener('pointerdown', e => {
+  initAudio();
+  if (won || anyMoving()) return;             // бить можно, только когда всё остановилось
+  const p = toGame(e);
+  // ищем ближайший шар (который ещё не в банке) рядом с пальцем
+  let best = null, bestD = R + 25;
+  for (const b of balls) {
+    const d = Math.hypot(b.x - p.x, b.y - p.y);
+    if (!b.inJar && d < bestD) { best = b; bestD = d; }
+  }
+  if (best) {
+    aim = { ball: best, px: p.x, py: p.y };
+    canvas.setPointerCapture(e.pointerId);
+  }
+});
+
+canvas.addEventListener('pointermove', e => {
+  if (!aim) return;
+  const p = toGame(e);
+  aim.px = p.x; aim.py = p.y;
+});
+
+canvas.addEventListener('pointerup', () => {
+  if (!aim) return;
+  const b = aim.ball;
+  const dx = b.x - aim.px, dy = b.y - aim.py;
+  const dist = Math.hypot(dx, dy);
+  if (dist > 10) {                             // совсем слабое движение не считаем ударом
+    const power = Math.min(dist, MAX_PULL) / MAX_PULL * MAX_SPEED;
+    b.vx = dx / dist * power;
+    b.vy = dy / dist * power;
+    shots++;
+    soundCue();
+    updateScore();
+  }
+  aim = null;
+});
+canvas.addEventListener('pointercancel', () => { aim = null; });
+
+document.getElementById('btnRestart').onclick = () => { initAudio(); startLevel(); };
+document.getElementById('btnNext').onclick = () => {
+  level++;
+  save('jar_level', level);
+  startLevel();
+};
+document.getElementById('btnSound').onclick = e => {
+  soundOn = !soundOn;
+  e.target.textContent = soundOn ? '🔊' : '🔇';
+};
+
+// ===================== ФОТО НА ШАРАХ =====================
+// Пользователь сам выбирает фото на своём устройстве, сам ставит лицо в круг.
+// Фото никуда не отправляется — сохраняется только в localStorage этого браузера.
+const photoBox = document.getElementById('photoBox');
+const crop = document.getElementById('cropCanvas');
+const cctx = crop.getContext('2d');
+const zoomInput = document.getElementById('zoom');
+const fileInput = document.getElementById('fileInput');
+const CIRCLE = 100;                 // радиус круга в редакторе (центр 120, 120)
+let cropImg = null;                 // исходное фото
+let baseScale = 1, ox = 0, oy = 0;  // масштаб и сдвиг фото в редакторе
+let dragFrom = null;
+
+function cropScale() { return baseScale * Number(zoomInput.value); }
+
+function drawCrop() {
+  cctx.clearRect(0, 0, 240, 240);
+  if (!cropImg) {
+    cctx.fillStyle = '#c2185b';
+    cctx.font = '14px "Trebuchet MS"';
+    cctx.textAlign = 'center';
+    cctx.fillText('Нажми «Выбрать фото»', 120, 124);
+    return;
+  }
+  const s = cropScale();
+  cctx.drawImage(cropImg, ox, oy, cropImg.width * s, cropImg.height * s);
+  // затемняем всё, что вне круга
+  cctx.fillStyle = 'rgba(0,0,0,0.6)';
+  cctx.beginPath();
+  cctx.rect(0, 0, 240, 240);
+  cctx.arc(120, 120, CIRCLE, 0, Math.PI * 2, true);
+  cctx.fill();
+  cctx.strokeStyle = '#ff2d87';
+  cctx.lineWidth = 2;
+  cctx.beginPath();
+  cctx.arc(120, 120, CIRCLE, 0, Math.PI * 2);
+  cctx.stroke();
+}
+
+document.getElementById('btnPhoto').onclick = () => { initAudio(); photoBox.classList.add('show'); drawCrop(); };
+document.getElementById('btnPick').onclick = () => fileInput.click();
+document.getElementById('btnCropCancel').onclick = () => photoBox.classList.remove('show');
+document.getElementById('btnPhotoOff').onclick = () => {
+  photoImg = null;
+  remove('jar_photo');
+  photoBox.classList.remove('show');
+};
+
+fileInput.onchange = () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => {
+    cropImg = img;
+    // сначала фото целиком закрывает круг и стоит по центру
+    baseScale = (CIRCLE * 2) / Math.min(img.width, img.height);
+    zoomInput.value = 1;
+    ox = 120 - img.width * baseScale / 2;
+    oy = 120 - img.height * baseScale / 2;
+    drawCrop();
+  };
+  img.src = URL.createObjectURL(file);
+  fileInput.value = '';
+};
+
+// ползунок масштаба: увеличиваем относительно центра круга
+let prevZoom = 1;
+zoomInput.oninput = () => {
+  const k = Number(zoomInput.value) / prevZoom;
+  ox = 120 - (120 - ox) * k;
+  oy = 120 - (120 - oy) * k;
+  prevZoom = Number(zoomInput.value);
+  drawCrop();
+};
+fileInput.addEventListener('change', () => { prevZoom = 1; });
+
+// перетаскивание фото пальцем
+crop.addEventListener('pointerdown', e => { dragFrom = { x: e.clientX, y: e.clientY }; crop.setPointerCapture(e.pointerId); });
+crop.addEventListener('pointermove', e => {
+  if (!dragFrom || !cropImg) return;
+  const k = 240 / crop.getBoundingClientRect().width;   // если canvas на экране меньше 240
+  ox += (e.clientX - dragFrom.x) * k;
+  oy += (e.clientY - dragFrom.y) * k;
+  dragFrom = { x: e.clientX, y: e.clientY };
+  drawCrop();
+});
+crop.addEventListener('pointerup', () => { dragFrom = null; });
+
+// «Готово»: вырезаем круг в маленькую картинку 128×128 и сохраняем
+document.getElementById('btnCropOk').onclick = () => {
+  if (!cropImg) { photoBox.classList.remove('show'); return; }
+  const out = document.createElement('canvas');
+  out.width = out.height = 128;
+  const k = 128 / (CIRCLE * 2);
+  const s = cropScale();
+  out.getContext('2d').drawImage(cropImg, (ox - (120 - CIRCLE)) * k, (oy - (120 - CIRCLE)) * k,
+                                 cropImg.width * s * k, cropImg.height * s * k);
+  const data = out.toDataURL('image/jpeg', 0.85);
+  photoImg = new Image();
+  photoImg.src = data;
+  save('jar_photo', data);
+  photoBox.classList.remove('show');
+};
+
+// ===================== СТАРТ =====================
+window.addEventListener('resize', resize);
+resize();
+startLevel();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
